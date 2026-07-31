@@ -24,9 +24,17 @@ before('deploy', 'rocketchat:notify');
    ```
 
  - `rocketchat_title` - the title of the application, defaults to `{{application}}`
+ - `deploy_user` - the person who triggered the deployment. `{{user}}` is not usable for this,
+   as every key of a host in `hosts.yml` is also set as host config, so the SSH login name
+   overrides it. Resolved from the `DEPLOY_USER`, `GITHUB_ACTOR` or `GITLAB_USER_LOGIN`
+   environment variable, then from the bind mount paths when Deployer runs inside a container,
+   and finally falls back to `{{user}}`.
+   ```
+   set('deploy_user', 'ci');
+   ```
  - `rocketchat_text` - notification message
    ```
-   set('rocketchat_text', '_{{user}}_ deploying {{branch}} to {{target}}');
+   set('rocketchat_text', '_{{deploy_user}}_ deploying {{branch}} to {{target}}');
    ```
 
  - `rocketchat_success_text` – success template, default:
@@ -84,7 +92,36 @@ set('rocketchat_color', '#000000');
 set('rocketchat_success_color', '#00c100');
 set('rocketchat_failure_color', '#ff0909');
 
-set('rocketchat_text', '_{{user}}_ deploying `{{branch}}` to *{{target}}*');
+set('deploy_user', function() {
+    foreach (['DEPLOY_USER', 'GITHUB_ACTOR', 'GITLAB_USER_LOGIN'] as $variable) {
+        $value = getenv($variable);
+
+        if (is_string($value) && $value !== '') {
+            return $value;
+        }
+    }
+
+    // Deployer usually runs inside a container, where neither the login name nor the git config
+    // of the person deploying is available. The bind mount source paths still carry their home
+    // directory though, e.g. "/home/jdoe/.ssh /transfer/.ssh" for the mounted SSH directory.
+    $mounts = @file('/proc/self/mountinfo') ?: [];
+
+    foreach ([' /transfer/.ssh ', null] as $preferred) {
+        foreach ($mounts as $mount) {
+            if ($preferred !== null && strpos($mount, $preferred) === false) {
+                continue;
+            }
+
+            if (preg_match('#\s(?:/home|/Users)/([^/\s]+)/#', $mount, $matches)) {
+                return $matches[1];
+            }
+        }
+    }
+
+    return get('user');
+});
+
+set('rocketchat_text', '_{{deploy_user}}_ deploying `{{branch}}` to *{{target}}*');
 set('rocketchat_success_text', 'Deploy to *{{target}}* successful');
 set('rocketchat_failure_text', 'Deploy to *{{target}}* failed');
 
