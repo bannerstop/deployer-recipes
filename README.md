@@ -19,9 +19,21 @@ require 'vendor/bannerstop/deployer-recipes/recipe/rocketchat.php';
 
 ## Recipes
 
-| Recipe | Docs |
-|--------|------|
-| ...    | ...  |
+| Recipe     | Docs                                                     |
+|------------|----------------------------------------------------------|
+| rocketchat | [read](https://deployer.org/docs/7.x/contrib/rocketchat) |
+
+The recipe documents its additional settings (`deploy_user`, `rocketchat_commits`, `rocketchat_commits_limit`)
+in its header.
+
+## Tests
+
+Each major version has an end-to-end harness that drives a real `dep deploy` against a throwaway SSH host
+and asserts on the payloads a Rocket.Chat mock receives. It needs Docker and is not part of the installed package.
+
+```shell
+tests/deployer7/run.sh
+```
 
 ## License
 
