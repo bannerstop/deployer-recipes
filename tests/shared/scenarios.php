@@ -161,6 +161,7 @@ function scenario(string $name, callable $run): void
 }
 
 // The key is mounted read-only with the permissions of the host user, ssh refuses to use that
+is_dir('/root/.ssh') || mkdir('/root/.ssh', 0700);
 copy('/keys/id', KEY_FILE);
 chmod(KEY_FILE, 0600);
 
