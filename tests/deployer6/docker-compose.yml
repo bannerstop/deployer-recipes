@@ -1,0 +1,27 @@
+services:
+    sshd:
+        build: ../shared/sshd
+        volumes:
+            - ${KEYS_DIR}:/keys:ro
+
+    mock:
+        build: ../shared/mock
+
+    driver:
+        image: mluex/deployer:6.8
+        entrypoint: ["php", "/tests/scenarios.php"]
+        working_dir: /opt/deployer
+        environment:
+            # Makes the previous revision undeterminable: Deployer 6 reads it from the git clone of `current`
+            - BREAK_PREVIOUS=rm -rf ~/app/current/.git
+        depends_on:
+            mock:
+                condition: service_healthy
+            sshd:
+                condition: service_started
+        volumes:
+            - ../shared/scenarios.php:/tests/scenarios.php:ro
+            - ./deploy.php:/opt/deployer/deploy.php:ro
+            - ./hosts.yml:/opt/deployer/hosts.yml:ro
+            - ../../recipe:/opt/deployer/vendor/bannerstop/deployer-recipes/recipe:ro
+            - ${KEYS_DIR}:/keys:ro
