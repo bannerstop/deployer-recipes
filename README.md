@@ -22,9 +22,32 @@ require 'vendor/bannerstop/deployer-recipes/recipe/rocketchat.php';
 | Recipe     | Docs                                                     |
 |------------|----------------------------------------------------------|
 | rocketchat | [read](https://deployer.org/docs/7.x/contrib/rocketchat) |
+| sonar      | [see below](#sonar)                                      |
 
 The recipe documents its additional settings (`deploy_user`, `rocketchat_commits`, `rocketchat_commits_limit`)
 in its header.
+
+### sonar
+
+Reports every deployment to [sonar](https://sonar.bannerstop.org), so that a Project shows what was deployed when. The recipe hooks
+itself into the deployment (the start after `deploy:update_code`, the end after `deploy:success` or `deploy:failed`, a rollback after
+`rollback`); its header documents the details.
+
+```php
+require 'vendor/bannerstop/deployer-recipes/recipe/sonar.php';
+```
+
+It is configured by the environment of the deploy, never by files in a repository:
+
+| Variable | Meaning |
+|----------|---------|
+| `SONAR_URL` | Base URL of the sonar instance |
+| `SONAR_TOKEN` | The Pulse token (`sonar_pls_...`) of the Project, shown on its page in sonar |
+
+Without both, the recipe does nothing and says nothing. With them, it sends `environment` (the alias of the host, or
+`set('sonar_environment', 'production')`), the revision, the previous revision and up to 100 commits (sha, subject, author) to
+`POST /intake/v1/deployment`. It is best effort: every request times out after 5 seconds and an error is only a warning, so a problem at
+sonar never breaks a deployment. Needs a sonar release that serves the endpoint.
 
 ## Tests
 
