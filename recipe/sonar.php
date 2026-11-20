@@ -2,15 +2,16 @@
 /*
  * sonar recipe for Deployer 7: reports every deployment to sonar, bannerstop's monitoring, so that a Project
  * shows what was deployed when (`POST /intake/v1/deployment`, see the contract at /intake/v1/openapi.yaml of the
- * sonar instance).
+ * sonar instance). The recipe of the 6.x release line behaves the same.
  */
 /*
 ## Installing
 
-Require the recipe. It hooks itself into the deployment, nothing else has to be added:
+Require the recipe. It hooks itself into the deployment (the task `deploy`), nothing else has to be added:
 
 ```
 require 'vendor/bannerstop/deployer-recipes/recipe/sonar.php';
+set('sonar_environment', 'production');
 ```
 
 Give the deploy environment the URL of the sonar instance and the Intake token of the Project (the Pulse token
@@ -22,20 +23,29 @@ SONAR_URL=https://sonar.example.org
 SONAR_TOKEN=sonar_pls_...
 ```
 
-Without `SONAR_URL` and `SONAR_TOKEN` the recipe does nothing, silently.
+Without `SONAR_URL` and `SONAR_TOKEN` the recipe does nothing, silently. `SONAR_URL` has to be an `https://` address:
+the token travels in it, so a plain `http://` address is refused with a warning and nothing is reported (`SONAR_ALLOW_HTTP=1`
+lifts that for local tests only).
 
 ## What is reported
 
  - `after('deploy:update_code')`: the start (`status: started`). By now the revision of the release is known, and the
    commits of the deployment are read from the repository cache under `{{deploy_path}}/.dep/repo`: `git log
    previous..current` (merge commits included), at most 100 (sha, subject, author), where `previous` is the revision of
-   `current` before the deployment. The first deployment has no previous revision and sends no commits.
- - `after('deploy:success')`: the end with `status: succeeded`; `after('deploy:failed')`: `status: failed` (only when
-   the start was reported: a deployment that failed before it had a revision says nothing).
+   `current` before the deployment. The first deployment has no previous revision and sends no commits. When the
+   repository does not know `previous` (a shallow clone), it is deepened once; if it still does not, the list stays empty.
+ - `after('deploy')`: the end with `status: succeeded`, whichever tasks the flow `deploy` is made of; `after('deploy:failed')`:
+   `status: failed` (only when the start was reported: a deployment that failed before it had a revision says nothing).
+   A flow of another name than `deploy` has to hook `sonar:deployment:success` and `sonar:deployment:failure` itself.
  - `before('rollback')` / `after('rollback')`: `status: rolled_back`, with the revision that is live again and the
-   revision that was rolled back as the previous one.
+   revision that was rolled back as the previous one. A rollback that changes nothing (only one release) reports nothing.
 
-The start and the end share one client-generated id, so sonar records one Deployment that it updates.
+The start and the end share one client-generated id, so sonar records one Deployment that it completes. With several
+hosts every host reports its own Deployment.
+
+Commit subjects and authors that are not valid UTF-8 (a latin1 commit) are read as ISO-8859-1 before they are sent, so
+the report is always valid JSON. Note that `dep -vvv` prints the output of `git log`, so author names appear in the log of a CI job
+that runs with it.
 
 ## Best effort
 
@@ -47,11 +57,8 @@ refusal, a slow answer) is only printed as a warning, and nothing is retried.
  - `sonar_url` - base URL of the sonar instance, defaults to the environment variable `SONAR_URL`
  - `sonar_token` - Intake token of the Project, defaults to the environment variable `SONAR_TOKEN`
  - `sonar_environment` - the environment of the deployment, a lower-case name of up to 32 letters, digits, dashes and
-   underscores. **Set it explicitly** (`production` or `staging`); it falls back to the alias of the host, cleaned up to fit,
-   which is only right when the alias is the environment.
-   ```
-   set('sonar_environment', 'production');
-   ```
+   underscores. **Set it explicitly** (`production` or `staging`); it falls back to the alias of the host, cleaned up to fit.
+   When neither gives a valid name, nothing is reported (with a warning) rather than guessing `production`.
  */
 namespace Deployer;
 
@@ -59,29 +66,85 @@ use Deployer\Utility\Httpie;
 
 const SONAR_TIMEOUT_SECONDS = 5;
 const SONAR_MAX_COMMITS = 100;
+const SONAR_DEEPEN_COMMITS = 500;
+
+/**
+ * An environment variable, trimmed, or null when it is not set or blank.
+ */
+function sonarEnvValue(string $name): ?string
+{
+    $value = getenv($name);
+    $value = is_string($value) ? trim($value) : '';
+
+    return $value === '' ? null : $value;
+}
 
 set('sonar_url', function () {
-    $value = getenv('SONAR_URL');
-
-    return is_string($value) && $value !== '' ? $value : null;
+    return sonarEnvValue('SONAR_URL');
 });
 
 set('sonar_token', function () {
-    $value = getenv('SONAR_TOKEN');
-
-    return is_string($value) && $value !== '' ? $value : null;
+    return sonarEnvValue('SONAR_TOKEN');
 });
 
 set('sonar_environment', function () {
-    $name = strtolower(trim((string) get('alias', 'production')));
-    $name = trim((string) preg_replace('/[^a-z0-9_-]+/', '-', $name), '-_');
+    $name = strtolower(trim((string) get('alias', '')));
 
-    return $name === '' ? 'production' : substr($name, 0, 32);
+    return trim((string) preg_replace('/[^a-z0-9_-]+/', '-', $name), '-_');
 });
+
+/**
+ * A setting, or null when it is not set.
+ */
+function sonarSetting(string $name)
+{
+    try {
+        return get($name);
+    } catch (\Throwable $exception) {
+        return null;
+    }
+}
 
 function sonarEnabled(): bool
 {
-    return get('sonar_url') !== null && get('sonar_token') !== null;
+    return sonarSetting('sonar_url') !== null && sonarSetting('sonar_token') !== null;
+}
+
+function sonarWarning(string $message): void
+{
+    warning($message);
+}
+
+/**
+ * The address reports go to, or null (with a warning) when SONAR_URL is not an https address.
+ */
+function sonarEndpoint(): ?string
+{
+    $url = (string) sonarSetting('sonar_url');
+    $https = preg_match('#^https://#i', $url) === 1;
+    $http = preg_match('#^http://#i', $url) === 1 && sonarEnvValue('SONAR_ALLOW_HTTP') === '1';
+    if (!$https && !$http) {
+        sonarWarning('SONAR_URL has to be an https:// address, the token travels in it; nothing is reported to sonar.');
+
+        return null;
+    }
+
+    return rtrim($url, '/') . '/intake/v1/deployment';
+}
+
+/**
+ * The environment of the deployment, or null (with a warning) when the setting is no valid name.
+ */
+function sonarEnvironment(): ?string
+{
+    $name = (string) sonarSetting('sonar_environment');
+    if (preg_match('/^[a-z0-9][a-z0-9_-]{0,31}$/', $name) !== 1) {
+        sonarWarning("sonar_environment is not a valid environment name (lower-case letters, digits, dashes and underscores, up to 32); nothing is reported to sonar. Set it, e.g. set('sonar_environment', 'production').");
+
+        return null;
+    }
+
+    return $name;
 }
 
 function sonarUuid(): string
@@ -99,44 +162,88 @@ function sonarNow(): string
 }
 
 /**
+ * Text that json_encode takes: a string that is not valid UTF-8 (a latin1 commit) is read as ISO-8859-1.
+ */
+function sonarClean(string $text): string
+{
+    return mb_check_encoding($text, 'UTF-8') ? $text : (string) mb_convert_encoding($text, 'UTF-8', 'ISO-8859-1');
+}
+
+/**
  * Sends one report and never throws: a failure is only a warning, and the message never carries the token.
  */
 function sonarReport(array $body): void
 {
     try {
-        $url = rtrim((string) get('sonar_url'), '/') . '/intake/v1/deployment';
+        $url = sonarEndpoint();
+        if ($url === null) {
+            return;
+        }
+        $json = json_encode($body);
+        if ($json === false) {
+            sonarWarning('sonar could not be told about the deployment (' . json_last_error_msg() . '); the deployment goes on.');
+
+            return;
+        }
         $info = [];
         Httpie::post($url)
-            ->header('Authorization', 'Bearer ' . get('sonar_token'))
+            ->header('Authorization', 'Bearer ' . sonarSetting('sonar_token'))
             ->setopt(CURLOPT_TIMEOUT, SONAR_TIMEOUT_SECONDS)
             ->setopt(CURLOPT_CONNECTTIMEOUT, SONAR_TIMEOUT_SECONDS)
             ->nothrow()
-            ->jsonBody($body)
+            ->body($json)
+            ->header('Content-Type', 'application/json')
             ->send($info);
         $status = (int) ($info['http_code'] ?? 0);
         if ($status < 200 || $status >= 300) {
-            warning('sonar did not take the deployment report' . ($status > 0 ? " (HTTP $status)" : ' (no answer)') . '; the deployment goes on.');
+            sonarWarning('sonar did not take the deployment report' . ($status > 0 ? " (HTTP $status)" : ' (no answer)') . '; the deployment goes on.');
         }
     } catch (\Throwable $exception) {
-        warning('sonar could not be told about the deployment (' . get_class($exception) . '); the deployment goes on.');
+        sonarWarning('sonar could not be told about the deployment (' . substr(trim($exception->getMessage()), 0, 200) . '); the deployment goes on.');
+    }
+}
+
+function sonarGit(): string
+{
+    return '{{bin/git}} --git-dir={{deploy_path}}/.dep/repo';
+}
+
+function sonarKnows(string $revision): bool
+{
+    try {
+        run(sonarGit() . ' cat-file -e ' . escapeshellarg($revision . '^{commit}'));
+
+        return true;
+    } catch (\Throwable $exception) {
+        return false;
     }
 }
 
 /**
- * The commits between two revisions as sonar takes them, newest first as git prints them, at most 100.
+ * The commits between two revisions as sonar takes them, newest first as git prints them, at most 100. Empty when the
+ * repository does not know the old revision, even after it was deepened once.
  *
- * @return list<array{sha: string, subject: string, author: string}>
+ * @return array[]
  */
 function sonarCommits(string $old, string $new): array
 {
-    $git = '--git-dir={{deploy_path}}/.dep/repo';
+    if (!sonarKnows($old)) {
+        try {
+            run(sonarGit() . ' fetch --quiet --deepen=' . SONAR_DEEPEN_COMMITS);
+        } catch (\Throwable $exception) {
+            // not a shallow repository, or no way to fetch: the check below decides
+        }
+        if (!sonarKnows($old)) {
+            return [];
+        }
+    }
     $format = escapeshellarg('%H%x09%an%x09%s');
-    $log = trim(run('{{bin/git}} ' . $git . ' log --max-count=' . SONAR_MAX_COMMITS . ' --format=' . $format . ' ' . $old . '..' . $new));
+    $log = rtrim(run(sonarGit() . ' log --max-count=' . SONAR_MAX_COMMITS . ' --format=' . $format . ' ' . $old . '..' . $new), "\n");
     $commits = [];
     foreach ($log === '' ? [] : explode("\n", $log) as $entry) {
         $fields = explode("\t", $entry, 3);
-        if (count($fields) === 3) {
-            $commits[] = ['sha' => $fields[0], 'subject' => mb_substr($fields[2], 0, 500), 'author' => mb_substr($fields[1], 0, 255)];
+        if (count($fields) === 3 && preg_match('/^[0-9a-f]{40,64}$/', $fields[0]) === 1) {
+            $commits[] = ['sha' => $fields[0], 'subject' => mb_substr(sonarClean($fields[2]), 0, 500), 'author' => mb_substr(sonarClean($fields[1]), 0, 255)];
         }
     }
 
@@ -156,25 +263,26 @@ function sonarRevisionOf(string $path): ?string
 
 desc('Tells sonar that a deployment started');
 task('sonar:deployment:start', function () {
-    if (!sonarEnabled()) {
+    if (!sonarEnabled() || sonarEndpoint() === null) {
         return;
     }
 
     try {
+        $environment = sonarEnvironment();
         $revision = sonarRevisionOf('{{release_path}}');
-        if ($revision === null) {
+        if ($environment === null || $revision === null) {
             return;
         }
         $previous = sonarRevisionOf('{{current_path}}');
         try {
             $commits = $previous === null || $previous === $revision ? [] : sonarCommits($previous, $revision);
         } catch (\Throwable $exception) {
-            // the previous revision is not in the repository cache any more: report without a list
+            // the history cannot be read: report without a list
             $commits = [];
         }
         $deployment = [
             'id' => sonarUuid(),
-            'environment' => get('sonar_environment'),
+            'environment' => $environment,
             'revision' => $revision,
             'commits' => $commits,
             'startedAt' => sonarNow(),
@@ -186,18 +294,18 @@ task('sonar:deployment:start', function () {
         set('sonar_deployment', $deployment);
         sonarReport($deployment);
     } catch (\Throwable $exception) {
-        warning('sonar could not be told about the start of the deployment (' . get_class($exception) . '); the deployment goes on.');
+        sonarWarning('sonar could not be told about the start of the deployment (' . get_class($exception) . '); the deployment goes on.');
     }
 })->hidden();
 after('deploy:update_code', 'sonar:deployment:start');
 
 function sonarFinish(string $status): void
 {
-    $deployment = get('sonar_deployment', null);
+    $deployment = sonarSetting('sonar_deployment');
     if (!sonarEnabled() || !is_array($deployment)) {
         return;
     }
-    // a repeated report of the same id updates the Deployment
+    // a repeated report of the same id completes the Deployment
     sonarReport(array_merge($deployment, ['status' => $status, 'finishedAt' => sonarNow()]));
     set('sonar_deployment', null);
 }
@@ -206,7 +314,7 @@ desc('Tells sonar that a deployment succeeded');
 task('sonar:deployment:success', function () {
     sonarFinish('succeeded');
 })->hidden();
-after('deploy:success', 'sonar:deployment:success');
+after('deploy', 'sonar:deployment:success');
 
 desc('Tells sonar that a deployment failed');
 task('sonar:deployment:failure', function () {
@@ -216,6 +324,7 @@ after('deploy:failed', 'sonar:deployment:failure');
 
 desc('Remembers the revision that is live before a rollback');
 task('sonar:rollback:prepare', function () {
+    set('sonar_rolled_back_revision', null);
     if (!sonarEnabled()) {
         return;
     }
@@ -229,19 +338,21 @@ before('rollback', 'sonar:rollback:prepare');
 
 desc('Tells sonar that a deployment was rolled back');
 task('sonar:rollback:report', function () {
-    $rolledBack = get('sonar_rolled_back_revision', null);
-    if (!sonarEnabled() || $rolledBack === null) {
+    $rolledBack = sonarSetting('sonar_rolled_back_revision');
+    if (!sonarEnabled() || $rolledBack === null || sonarEndpoint() === null) {
         return;
     }
     try {
+        $environment = sonarEnvironment();
         $revision = sonarRevisionOf('{{current_path}}');
-        if ($revision === null) {
+        // the same revision is live: there was no release to go back to
+        if ($environment === null || $revision === null || $revision === $rolledBack) {
             return;
         }
         $now = sonarNow();
         sonarReport([
             'id' => sonarUuid(),
-            'environment' => get('sonar_environment'),
+            'environment' => $environment,
             'revision' => $revision,
             'previousRevision' => $rolledBack,
             'commits' => [],
@@ -250,7 +361,7 @@ task('sonar:rollback:report', function () {
             'status' => 'rolled_back',
         ]);
     } catch (\Throwable $exception) {
-        warning('sonar could not be told about the rollback (' . get_class($exception) . '); the rollback is done.');
+        sonarWarning('sonar could not be told about the rollback (' . get_class($exception) . '); the rollback is done.');
     }
 })->hidden();
 after('rollback', 'sonar:rollback:report');
