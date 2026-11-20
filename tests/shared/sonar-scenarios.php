@@ -104,8 +104,8 @@ scenario('10. without SONAR_URL and SONAR_TOKEN nothing is sent and nothing is s
         $result = deploy($env);
         successAttachments($name, $result);
         expect("$name: no report (" . implode(',', array_keys($env)) . ')', [], sonarRequests());
-        // Deployer lists the tasks it runs ("task sonar:deployment:start"); the recipe itself says nothing
-        $said = array_values(array_filter(explode("\n", $result[1]), fn ($line) => stripos($line, 'sonar') !== false && strpos($line, 'task sonar:') !== 0));
+        // Deployer lists the tasks it runs ("task sonar:deployment:start", "Executing task sonar:..." in 6); the recipe itself says nothing
+        $said = array_values(array_filter(explode("\n", $result[1]), fn ($line) => stripos($line, 'sonar') !== false && strpos($line, 'task sonar:') !== 0 && strpos($line, 'Executing task sonar:') === false));
         expect("$name: no word about sonar", [], $said);
     }
 });
@@ -170,4 +170,25 @@ scenario('14. a rollback is reported as rolled back, with the revision that is l
     expect("$name: revision", $first, $requests[0]['body']['revision'] ?? null);
     expect("$name: previous revision", $second, $requests[0]['body']['previousRevision'] ?? null);
     expect("$name: commits", [], $requests[0]['body']['commits'] ?? null);
+});
+
+scenario('15. the commits of a deployment include the merge commit', function ($name) {
+    fresh();
+    deploy();
+    $first = commit('Fix the cart total', 'Bob Example');
+    sh('cd ' . WORK_DIR . ' && git checkout -q -b feature/export');
+    $second = commit('Export orders as CSV', 'Carol Example');
+    sh('cd ' . WORK_DIR . ' && git checkout -q main');
+    mergeBranch('feature/export', 'Alice Example');
+    $merge = head();
+    push();
+
+    successAttachments($name, deploy(sonarEnv()));
+    $requests = sonarRequests();
+
+    expect("$name: commits, merge first", [
+        ['sha' => $merge, 'subject' => "Merge branch 'feature/export'", 'author' => 'Alice Example'],
+        ['sha' => $second, 'subject' => 'Export orders as CSV', 'author' => 'Carol Example'],
+        ['sha' => $first, 'subject' => 'Fix the cart total', 'author' => 'Bob Example'],
+    ], $requests[0]['body']['commits'] ?? null);
 });

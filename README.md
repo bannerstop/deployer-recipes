@@ -44,9 +44,9 @@ It is configured by the environment of the deploy, never by files in a repositor
 | `SONAR_URL` | Base URL of the sonar instance |
 | `SONAR_TOKEN` | The Pulse token (`sonar_pls_...`) of the Project, shown on its page in sonar |
 
-Without both, the recipe does nothing and says nothing. With them, it sends `environment` (the alias of the host, or
-`set('sonar_environment', 'production')`), the revision, the previous revision and up to 100 commits (sha, subject, author) to
-`POST /intake/v1/deployment`. It is best effort: every request times out after 5 seconds and an error is only a warning, so a problem at
+Without both, the recipe does nothing and says nothing. With them, it sends `environment` (set it with `set('sonar_environment', 'production')`, or
+`staging`; the alias of the host is only the fallback), the revision, the previous revision and up to 100 commits (sha, subject, author, merge commits included) to
+`POST /intake/v1/deployment`; a rollback is reported as a Deployment of its own. It is best effort: every request times out after 5 seconds and an error is only a warning, so a problem at
 sonar never breaks a deployment. Needs a sonar release that serves the endpoint.
 
 ## Tests

@@ -28,7 +28,7 @@ Without `SONAR_URL` and `SONAR_TOKEN` the recipe does nothing, silently.
 
  - `after('deploy:update_code')`: the start (`status: started`). By now the revision of the release is known, and the
    commits of the deployment are read from the repository cache under `{{deploy_path}}/.dep/repo`: `git log
-   previous..current` without merge commits, at most 100 (sha, subject, author), where `previous` is the revision of
+   previous..current` (merge commits included), at most 100 (sha, subject, author), where `previous` is the revision of
    `current` before the deployment. The first deployment has no previous revision and sends no commits.
  - `after('deploy:success')`: the end with `status: succeeded`; `after('deploy:failed')`: `status: failed` (only when
    the start was reported: a deployment that failed before it had a revision says nothing).
@@ -47,7 +47,8 @@ refusal, a slow answer) is only printed as a warning, and nothing is retried.
  - `sonar_url` - base URL of the sonar instance, defaults to the environment variable `SONAR_URL`
  - `sonar_token` - Intake token of the Project, defaults to the environment variable `SONAR_TOKEN`
  - `sonar_environment` - the environment of the deployment, a lower-case name of up to 32 letters, digits, dashes and
-   underscores. Defaults to the alias of the host (`production`, `staging`, ...), cleaned up to fit.
+   underscores. **Set it explicitly** (`production` or `staging`); it falls back to the alias of the host, cleaned up to fit,
+   which is only right when the alias is the environment.
    ```
    set('sonar_environment', 'production');
    ```
@@ -130,7 +131,7 @@ function sonarCommits(string $old, string $new): array
 {
     $git = '--git-dir={{deploy_path}}/.dep/repo';
     $format = escapeshellarg('%H%x09%an%x09%s');
-    $log = trim(run('{{bin/git}} ' . $git . ' log --no-merges --max-count=' . SONAR_MAX_COMMITS . ' --format=' . $format . ' ' . $old . '..' . $new));
+    $log = trim(run('{{bin/git}} ' . $git . ' log --max-count=' . SONAR_MAX_COMMITS . ' --format=' . $format . ' ' . $old . '..' . $new));
     $commits = [];
     foreach ($log === '' ? [] : explode("\n", $log) as $entry) {
         $fields = explode("\t", $entry, 3);
