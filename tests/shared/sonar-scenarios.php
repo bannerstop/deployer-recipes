@@ -9,7 +9,8 @@ const SONAR_TOKEN = 'sonar_pls_0000000000000000000000000000000000000000000000000
 
 function sonarEnv(string $prefix = ''): array
 {
-    return ['SONAR_URL' => 'http://mock:8080' . $prefix, 'SONAR_TOKEN' => SONAR_TOKEN];
+    // the mock speaks http, which the recipe only takes with SONAR_ALLOW_HTTP
+    return ['SONAR_URL' => 'http://mock:8080' . $prefix, 'SONAR_TOKEN' => SONAR_TOKEN, 'SONAR_ALLOW_HTTP' => '1'];
 }
 
 function sonarRequests(): array
@@ -116,7 +117,7 @@ scenario('11. sonar unreachable: the deployment succeeds and says so in a warnin
     commit('Fix the cart total', 'Bob Example');
     push();
 
-    $result = deploy(['SONAR_URL' => 'http://sonar.invalid:8080', 'SONAR_TOKEN' => SONAR_TOKEN]);
+    $result = deploy(['SONAR_URL' => 'http://sonar.invalid:8080', 'SONAR_TOKEN' => SONAR_TOKEN, 'SONAR_ALLOW_HTTP' => '1']);
 
     successAttachments($name, $result);
     expect("$name: warning", true, stripos($result[1], 'sonar could not be told') !== false || stripos($result[1], 'sonar did not take') !== false);
@@ -191,4 +192,122 @@ scenario('15. the commits of a deployment include the merge commit', function ($
         ['sha' => $second, 'subject' => 'Export orders as CSV', 'author' => 'Carol Example'],
         ['sha' => $first, 'subject' => 'Fix the cart total', 'author' => 'Bob Example'],
     ], $requests[0]['body']['commits'] ?? null);
+});
+
+scenario('16. the end is reported by a flow without any success task', function ($name) {
+    fresh();
+    deploy();
+    commit('Fix the cart total', 'Bob Example');
+    push();
+
+    [$status, $output] = deploy(sonarEnv() + ['E2E_FLOW' => 'nosuccess']);
+    $requests = sonarRequests();
+
+    expect("$name: dep deploy exit code ($output)", 0, $status);
+    expect("$name: statuses", ['started', 'succeeded'], array_map(fn ($request) => $request['body']['status'] ?? null, $requests));
+    expect("$name: same id", $requests[0]['body']['id'] ?? null, $requests[1]['body']['id'] ?? null);
+});
+
+scenario('17. a latin1 commit still gives a valid report (git hands the recipe UTF-8, the cleanup of the recipe is the safety net)', function ($name) {
+    fresh();
+    deploy();
+    // the bytes of a latin1 commit must not pass through the PHP of the driver (escapeshellarg drops them): a message file and printf
+    global $clock;
+    $clock++;
+    file_put_contents(WORK_DIR . '/file.txt', "latin1\n", FILE_APPEND);
+    file_put_contents(WORK_DIR . '/message.txt', "Caf\xE4 fix\n");
+    $date = '@' . $clock . ' +0000';
+    sh('cd ' . WORK_DIR . ' && git add -A && GIT_AUTHOR_NAME="$(printf \'Bj\\366rn Example\')" GIT_AUTHOR_EMAIL=b@example.com GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e@example.com GIT_AUTHOR_DATE=' . escapeshellarg($date) . ' GIT_COMMITTER_DATE=' . escapeshellarg($date) . ' git commit -q -F message.txt');
+    $latin1 = head();
+    push();
+
+    $result = deploy(sonarEnv());
+    successAttachments($name, $result);
+    $requests = sonarRequests();
+
+    expect("$name: number of reports", 2, count($requests));
+    expect("$name: commit", [['sha' => $latin1, 'subject' => 'Cafä fix', 'author' => 'Björn Example']], $requests[0]['body']['commits'] ?? null);
+});
+
+scenario('18. quotes, dollar signs, backticks, backslashes and unicode in subjects and authors arrive as they are', function ($name) {
+    fresh();
+    deploy();
+    $subject = 'He said "hi" $HOME `uname` \'x\' \\ ünïcödé ✓ 日本';
+    $author = "O'Brien Müller";
+    // through files: escapeshellarg drops non-ASCII characters in the locale of some deployer images
+    global $clock;
+    $clock++;
+    file_put_contents(WORK_DIR . '/file.txt', "unicode\n", FILE_APPEND);
+    file_put_contents(WORK_DIR . '/message.txt', $subject . "\n");
+    file_put_contents(WORK_DIR . '/author.sh', 'export GIT_AUTHOR_NAME="' . $author . '"' . "\n");
+    $date = '@' . $clock . ' +0000';
+    sh('cd ' . WORK_DIR . ' && git add -A && . ./author.sh && GIT_AUTHOR_EMAIL=o@example.com GIT_COMMITTER_NAME=e2e GIT_COMMITTER_EMAIL=e@example.com GIT_AUTHOR_DATE=' . escapeshellarg($date) . ' GIT_COMMITTER_DATE=' . escapeshellarg($date) . ' git commit -q -F message.txt');
+    $hash = head();
+    push();
+
+    $result = deploy(sonarEnv());
+    successAttachments($name, $result);
+    $requests = sonarRequests();
+
+    expect("$name: commit", [['sha' => $hash, 'subject' => $subject, 'author' => $author]], $requests[0]['body']['commits'] ?? null);
+});
+
+scenario('19. more than 100 commits are cut to the newest 100', function ($name) {
+    fresh();
+    deploy();
+    $hashes = [];
+    for ($i = 1; $i <= 105; $i++) {
+        $hashes[$i] = commit("Change $i", 'Bob Example');
+    }
+    push();
+
+    $result = deploy(sonarEnv());
+    successAttachments($name, $result);
+    $requests = sonarRequests();
+
+    $expected = [];
+    for ($i = 105; $i > 5; $i--) {
+        $expected[] = ['sha' => $hashes[$i], 'subject' => "Change $i", 'author' => 'Bob Example'];
+    }
+    expect("$name: the newest 100", $expected, $requests[0]['body']['commits'] ?? null);
+});
+
+scenario('20. the environment is the one that is set, and an invalid one reports nothing but a warning', function ($name) {
+    fresh();
+    deploy();
+    commit('Fix the cart total', 'Bob Example');
+    push();
+
+    $result = deploy(sonarEnv() + ['E2E_SONAR_ENV' => 'staging']);
+    successAttachments($name, $result);
+    expect("$name: explicit environment", ['staging', 'staging'], array_map(fn ($request) => $request['body']['environment'] ?? null, sonarRequests()));
+
+    commit('Add voucher field', 'Alice Example');
+    push();
+    $result = deploy(sonarEnv() + ['E2E_SONAR_ENV' => 'Not Valid']);
+    successAttachments($name, $result);
+    expect("$name: nothing reported", [], sonarRequests());
+    expect("$name: warning", true, strpos($result[1], 'sonar_environment is not a valid environment name') !== false);
+});
+
+scenario('21. a plain http address is refused with a warning and nothing is sent', function ($name) {
+    fresh();
+    deploy();
+    commit('Fix the cart total', 'Bob Example');
+    push();
+
+    $result = deploy(['SONAR_URL' => 'http://mock:8080', 'SONAR_TOKEN' => SONAR_TOKEN]);
+
+    successAttachments($name, $result);
+    expect("$name: nothing sent", [], sonarRequests());
+    expect("$name: warning", true, strpos($result[1], 'has to be an https:// address') !== false);
+});
+
+scenario('22. a rollback with only one release reports nothing', function ($name) {
+    fresh();
+    deploy();
+
+    rollback(sonarEnv());
+
+    expect("$name: nothing reported", [], sonarRequests());
 });

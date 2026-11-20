@@ -27,7 +27,7 @@ require 'vendor/bannerstop/deployer-recipes/recipe/rocketchat.php';
 ### sonar
 
 Reports every deployment to [sonar](https://sonar.bannerstop.org), so that a Project shows what was deployed when. The recipe hooks
-itself into the deployment (the start after `deploy:update_code`, the end after `success` or `deploy:failed`, a rollback after
+itself into the deployment (the start after `deploy:update_code`, the end after `deploy:symlink` or `deploy:failed`, a rollback after
 `rollback`); its header documents the details.
 
 ```php
@@ -41,10 +41,10 @@ It is configured by the environment of the deploy, never by files in a repositor
 | `SONAR_URL` | Base URL of the sonar instance |
 | `SONAR_TOKEN` | The Pulse token (`sonar_pls_...`) of the Project, shown on its page in sonar |
 
-Without both, the recipe does nothing and says nothing. With them, it sends `environment` (set it with `set('sonar_environment', 'production')`, or
+Without both, the recipe does nothing and says nothing; `SONAR_URL` has to be `https://` (a plain `http://` address is refused with a warning). With them, it sends `environment` (set it with `set('sonar_environment', 'production')`, or
 `staging`; the target of the host is only the fallback), the revision, the previous revision and up to 100 commits (sha, subject, author, merge commits included) to
 `POST /intake/v1/deployment`; a rollback is reported as a Deployment of its own. It is best effort: every request times out after 5 seconds and an error is only a warning, so a problem at
-sonar never breaks a deployment. Needs a sonar release that serves the endpoint.
+sonar never breaks a deployment. With several hosts every host reports its own Deployment. `dep -vvv` prints the commit authors into the log of a CI job. Needs a sonar release that serves the endpoint.
 
 ## Tests
 

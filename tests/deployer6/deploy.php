@@ -21,7 +21,13 @@ if (getenv('E2E_COMMITS') === 'off') {
 
 inventory('hosts.yml');
 
-task('deploy', [
+// The environment of the report is set by the scenarios that want another one (or an invalid one)
+if (getenv('E2E_SONAR_ENV') !== false) {
+    set('sonar_environment', getenv('E2E_SONAR_ENV'));
+}
+
+// A flow without any success task: the end of the deployment is still reported
+task('deploy', array_merge([
     'deploy:prepare',
     'deploy:lock',
     'deploy:release',
@@ -29,8 +35,7 @@ task('deploy', [
     'deploy:symlink',
     'deploy:unlock',
     'cleanup',
-    'success',
-]);
+], getenv('E2E_FLOW') === 'nosuccess' ? [] : ['success']));
 
 before('deploy', 'rocketchat:notify');
 before('success', 'rocketchat:notify:success');
