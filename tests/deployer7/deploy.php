@@ -4,6 +4,7 @@ namespace Deployer;
 
 require 'recipe/common.php';
 require __DIR__ . '/vendor/bannerstop/deployer-recipes/recipe/rocketchat.php';
+require __DIR__ . '/vendor/bannerstop/deployer-recipes/recipe/sonar.php';
 
 set('application', 'acme/app');
 set('repository', getenv('E2E_REPOSITORY') ?: 'https://github.com/acme/app.git');
@@ -20,6 +21,24 @@ if (getenv('E2E_COMMITS') === 'off') {
 
 import(__DIR__ . '/hosts.yml');
 
+// The environment of the report is set by the scenarios that want another one (or an invalid one)
+if (getenv('E2E_SONAR_ENV') !== false) {
+    set('sonar_environment', getenv('E2E_SONAR_ENV'));
+}
+
+// A flow without any success task: the end of the deployment is still reported
+if (getenv('E2E_FLOW') === 'nosuccess') {
+    task('deploy', ['deploy:prepare', 'deploy:symlink', 'deploy:unlock', 'deploy:cleanup']);
+}
+
 before('deploy', 'rocketchat:notify');
 after('deploy:success', 'rocketchat:notify:success');
 after('deploy:failed', 'rocketchat:notify:failure');
+
+// A deploy that fails after the code is in place, to see the failure reported
+task('e2e:break', function () {
+    if (getenv('E2E_BREAK') === '1') {
+        throw new \RuntimeException('The deployment is broken on purpose.');
+    }
+});
+before('deploy:symlink', 'e2e:break');
