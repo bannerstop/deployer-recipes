@@ -268,6 +268,10 @@ scenario('6. repository outside GitHub lists the commits without links', functio
     ]), $attachments[1]['text'] ?? null);
 });
 
+if (getenv('E2E_SONAR') === '1') {
+    require __DIR__ . '/sonar-scenarios.php';
+}
+
 echo "\n" . $checks . ' checks, ' . count($failures) . " failed\n";
 foreach ($failures as $failure) {
     echo "\n" . $failure . "\n";

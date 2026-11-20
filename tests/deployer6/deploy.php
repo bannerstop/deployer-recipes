@@ -4,6 +4,7 @@ namespace Deployer;
 
 require_once __DIR__ . '/vendor/deployer/deployer/recipe/common.php';
 require_once __DIR__ . '/vendor/bannerstop/deployer-recipes/recipe/rocketchat.php';
+require_once __DIR__ . '/vendor/bannerstop/deployer-recipes/recipe/sonar.php';
 
 set('application', 'acme/app');
 set('repository', getenv('E2E_REPOSITORY') ?: 'https://github.com/acme/app.git');
@@ -34,3 +35,11 @@ task('deploy', [
 before('deploy', 'rocketchat:notify');
 before('success', 'rocketchat:notify:success');
 after('deploy:failed', 'rocketchat:notify:failure');
+
+// A deploy that fails after the code is in place, to see the failure reported
+task('e2e:break', function () {
+    if (getenv('E2E_BREAK') === '1') {
+        throw new \RuntimeException('The deployment is broken on purpose.');
+    }
+});
+before('deploy:symlink', 'e2e:break');

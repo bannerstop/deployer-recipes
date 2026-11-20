@@ -14,6 +14,8 @@ services:
         environment:
             # Makes the previous revision undeterminable: Deployer 6 reads it from the git clone of `current`
             - BREAK_PREVIOUS=rm -rf ~/app/current/.git
+            # Runs the scenarios of the sonar recipe
+            - E2E_SONAR=1
         depends_on:
             mock:
                 condition: service_healthy
@@ -21,6 +23,7 @@ services:
                 condition: service_started
         volumes:
             - ../shared/scenarios.php:/tests/scenarios.php:ro
+            - ../shared/sonar-scenarios.php:/tests/sonar-scenarios.php:ro
             - ./deploy.php:/opt/deployer/deploy.php:ro
             - ./hosts.yml:/opt/deployer/hosts.yml:ro
             - ../../recipe:/opt/deployer/vendor/bannerstop/deployer-recipes/recipe:ro
